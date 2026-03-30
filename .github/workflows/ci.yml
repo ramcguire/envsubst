@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo llvm-cov --lcov --output-path coverage.lcov
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.lcov
+
+  publish:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Default variant — debian12 with the standard distroless:latest tag.
+          # Receives the unqualified floating tags (latest, vX.Y.Z, sha-*).
+          - variant: static-debian12
+            distroless_tag: latest
+            tag_suffix: ""
+            branch_tag: latest
+
+          # Rootless variant — same base, distroless:nonroot tag.
+          # Runs as uid 65532 with no capability to escalate.
+          - variant: static-debian12
+            distroless_tag: nonroot
+            tag_suffix: "-nonroot"
+            branch_tag: nonroot
+
+          # Debian 13 variant — distroless:latest tag.
+          - variant: static-debian13
+            distroless_tag: latest
+            tag_suffix: "-debian13"
+            branch_tag: debian13
+
+          # Debian 13 + nonroot combination.
+          - variant: static-debian13
+            distroless_tag: nonroot
+            tag_suffix: "-debian13-nonroot"
+            branch_tag: debian13-nonroot
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            # Disable auto-latest; we set it explicitly below via type=raw.
+            latest=false
+            # Appended to all semver and SHA tags (e.g. v0.1.0-nonroot, sha-abc-debian13).
+            # type=raw tags override this with suffix= to produce clean floating names.
+            suffix=${{ matrix.tag_suffix }}
+          tags: |
+            # Semver release tags — only generated on v* tag pushes
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+            # Per-commit SHA tag — generated on every push
+            type=sha
+
+            # Floating branch tag: latest / nonroot / debian13 / debian13-nonroot
+            # suffix= overrides the global flavor suffix so the value is used verbatim
+            type=raw,value=${{ matrix.branch_tag }},enable={{is_default_branch}},suffix=
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          build-args: |
+            DISTROLESS_VARIANT=${{ matrix.variant }}
+            DISTROLESS_TAG=${{ matrix.distroless_tag }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Scope the cache per matrix entry to avoid cross-variant cache pollution
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.distroless_tag }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.distroless_tag }}
+
+  e2e:
+    # Run e2e tests against the default variant (debian12 latest) after it is published.
+    # Pull requests use a locally-built image since publish is skipped on PRs.
+    needs: [test, publish]
+    if: always() && needs.test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image to test
+        id: image
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # Use the SHA-tagged image that was just published
+            echo "ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            # On PRs: build a local amd64 image (no push, no cosign verify)
+            docker buildx build --tag envsubst:e2e --load .
+            echo "ref=envsubst:e2e" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run e2e tests
+        run: bash scripts/e2e.sh "${{ steps.image.outputs.ref }}"

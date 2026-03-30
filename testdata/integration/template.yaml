@@ -1,0 +1,3 @@
+greeting: ${EV_GREETING}
+service: ${EV_SERVICE}
+unset: ${EV_UNDEFINED_12345}

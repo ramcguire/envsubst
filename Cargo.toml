@@ -1,0 +1,18 @@
+[package]
+name = "envsubst"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+getopts = "0.2"
+glob = "0.3"
+shellexpand = { version = "3.1.2", features = ["base-0"], default-features = false }
+
+[dev-dependencies]
+temp-env = "0.3"
+tempfile = "3"
+
+[profile.release]
+strip = "symbols"
+opt-level = "z"
+lto = true
