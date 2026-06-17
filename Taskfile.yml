@@ -1,16 +1,11 @@
 version: '3'
 
-# pipefail ensures pipe errors propagate correctly on Unix.
-# Task silently ignores shell options it cannot apply on the current platform.
 set: [pipefail]
 
 vars:
-  # Override at the CLI: task docker:build IMAGE=myregistry/myimage
   IMAGE: envsubst
 
 tasks:
-
-  # ── Default ──────────────────────────────────────────────────────────────────
 
   default:
     desc: List all available tasks
@@ -18,36 +13,25 @@ tasks:
     cmds:
       - task --list
 
-  # ── Rust ─────────────────────────────────────────────────────────────────────
-
   test:
-    desc: Run tests
+    desc: Run unit and integration tests
     cmds:
-      - cargo test
+      - cargo xtask test
 
   test:coverage:
-    desc: Run tests with LLVM coverage and emit an HTML report under target/llvm-cov/
+    desc: Run tests with LLVM coverage (HTML report under target/llvm-cov/)
     cmds:
       - cargo llvm-cov --html
 
   lint:
-    desc: Run all lints in parallel (Clippy + formatting check)
-    deps: [lint:clippy, lint:fmt]
-
-  lint:clippy:
-    desc: Run Clippy — all warnings treated as errors
+    desc: Run Clippy and formatting check
     cmds:
-      - cargo clippy -- -D warnings
-
-  lint:fmt:
-    desc: Check that source is formatted (does not modify files)
-    cmds:
-      - cargo fmt --check
+      - cargo xtask lint
 
   fmt:
-    desc: Auto-format all source files with rustfmt
+    desc: Auto-format source files
     cmds:
-      - cargo fmt
+      - cargo xtask fmt
 
   build:
     desc: Debug build
@@ -61,54 +45,25 @@ tasks:
 
   docker:build:
     desc: >
-      Build one Docker variant for the current platform and load it into Docker.
-      Defaults to the standard variant (static-debian12, distroless:latest).
-      Override any combination at the CLI:
-        task docker:build VARIANT=static-debian13 DISTROLESS_TAG=nonroot IMAGE_TAG=mytest
+      Build the default image variant for the current platform (tag: dev).
+      Override the tag: task docker:build IMAGE_TAG=mytest
     vars:
-      VARIANT:       "{{.VARIANT       | default \"static-debian12\"}}"
-      DISTROLESS_TAG: "{{.DISTROLESS_TAG | default \"latest\"}}"
-      IMAGE_TAG:     "{{.IMAGE_TAG     | default \"dev\"}}"
+      IMAGE_TAG: "{{.IMAGE_TAG | default \"dev\"}}"
     cmds:
-      - >-
-        docker buildx build
-        --build-arg DISTROLESS_VARIANT={{.VARIANT}}
-        --build-arg DISTROLESS_TAG={{.DISTROLESS_TAG}}
-        --tag {{.IMAGE}}:{{.IMAGE_TAG}}
-        --load
-        .
+      - cargo xtask docker-build {{.IMAGE_TAG}}
 
   docker:build:all:
-    desc: >
-      Build all four matrix variants for the current platform and load them
-      into Docker. Produces: dev, dev-nonroot, dev-debian13, dev-debian13-nonroot.
+    desc: Build all four image variants for the current platform
     cmds:
-      - task: _docker:variant
-        vars: {VARIANT: static-debian12, DISTROLESS_TAG: latest,  IMAGE_TAG: dev}
-      - task: _docker:variant
-        vars: {VARIANT: static-debian12, DISTROLESS_TAG: nonroot, IMAGE_TAG: dev-nonroot}
-      - task: _docker:variant
-        vars: {VARIANT: static-debian13, DISTROLESS_TAG: latest,  IMAGE_TAG: dev-debian13}
-      - task: _docker:variant
-        vars: {VARIANT: static-debian13, DISTROLESS_TAG: nonroot, IMAGE_TAG: dev-debian13-nonroot}
+      - cargo xtask docker-build-all
+
+  docker:test:
+    desc: Build default image and run Docker integration tests
+    cmds:
+      - cargo xtask docker-build
+      - cargo xtask docker-test {{.IMAGE}}:dev
 
   ci:
-    desc: >
-      Run the full CI pipeline locally: test → lint → docker build (all variants).
-      Mirrors the GitHub Actions workflow — same steps, current platform only
-      (no multi-arch push). Requires Docker to be running.
+    desc: Full CI pipeline — test, lint, docker-build, docker-test
     cmds:
-      - task: test
-      - task: lint
-      - task: docker:build:all
-
-  _docker:variant:
-    internal: true
-    cmds:
-      - >-
-        docker buildx build
-        --build-arg DISTROLESS_VARIANT={{.VARIANT}}
-        --build-arg DISTROLESS_TAG={{.DISTROLESS_TAG}}
-        --tag {{.IMAGE}}:{{.IMAGE_TAG}}
-        --load
-        .
+      - cargo xtask ci

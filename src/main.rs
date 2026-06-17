@@ -338,8 +338,8 @@ mod tests {
     #[test]
     fn integration_template_to_output_dir() {
         let out_dir = tempfile::TempDir::new().unwrap();
-        let base = PathBuf::from("testdata/integration");
-        let file = PathBuf::from("testdata/integration/template.yaml");
+        let base = PathBuf::from("xtask/testdata/integration");
+        let file = PathBuf::from("xtask/testdata/integration/template.yaml");
 
         temp_env::with_vars(
             [
@@ -363,8 +363,8 @@ mod tests {
     #[test]
     fn integration_nested_structure_preserved() {
         let out_dir = tempfile::TempDir::new().unwrap();
-        let base = PathBuf::from("testdata/integration");
-        let file = PathBuf::from("testdata/integration/nested/service.conf");
+        let base = PathBuf::from("xtask/testdata/integration");
+        let file = PathBuf::from("xtask/testdata/integration/nested/service.conf");
 
         temp_env::with_vars(
             [
@@ -401,8 +401,8 @@ mod tests {
             || {
                 let preloaded = parse_env_file(env_file.path()).unwrap();
                 let ctx = EnvContext::new(preloaded, false);
-                let base = PathBuf::from("testdata/integration");
-                let file = PathBuf::from("testdata/integration/nested/service.conf");
+                let base = PathBuf::from("xtask/testdata/integration");
+                let file = PathBuf::from("xtask/testdata/integration/nested/service.conf");
                 process_file(&file, &base, Some(out_dir.path()), &ctx, false);
                 let out = fs::read_to_string(out_dir.path().join("nested/service.conf")).unwrap();
                 assert!(out.contains("host = db.example.com"));
@@ -415,8 +415,8 @@ mod tests {
     #[test]
     fn integration_env_file_mode_ignores_real_env() {
         let out_dir = tempfile::TempDir::new().unwrap();
-        let base = PathBuf::from("testdata/integration");
-        let file = PathBuf::from("testdata/integration/nested/service.conf");
+        let base = PathBuf::from("xtask/testdata/integration");
+        let file = PathBuf::from("xtask/testdata/integration/nested/service.conf");
 
         // Real env has different values — file mode must not see them
         temp_env::with_vars(
@@ -443,8 +443,8 @@ mod tests {
     #[test]
     fn integration_missing_vars_tracked() {
         let out_dir = tempfile::TempDir::new().unwrap();
-        let base = PathBuf::from("testdata/integration");
-        let file = PathBuf::from("testdata/integration/template.yaml");
+        let base = PathBuf::from("xtask/testdata/integration");
+        let file = PathBuf::from("xtask/testdata/integration/template.yaml");
 
         temp_env::with_vars(
             [("EV_GREETING", Some("hey")), ("EV_SERVICE", Some("svc"))],
@@ -459,8 +459,8 @@ mod tests {
     #[test]
     fn integration_stdout_when_no_output_dir() {
         // process_file with no output_dir should not panic and not write files
-        let base = PathBuf::from("testdata/integration");
-        let file = PathBuf::from("testdata/integration/template.yaml");
+        let base = PathBuf::from("xtask/testdata/integration");
+        let file = PathBuf::from("xtask/testdata/integration/template.yaml");
 
         temp_env::with_vars(
             [("EV_GREETING", Some("hi")), ("EV_SERVICE", Some("s"))],
@@ -477,8 +477,8 @@ mod tests {
     #[test]
     fn fail_on_missing_real_env_has_unresolved_vars() {
         let out_dir = tempfile::TempDir::new().unwrap();
-        let base = PathBuf::from("testdata/integration");
-        let file = PathBuf::from("testdata/integration/template.yaml");
+        let base = PathBuf::from("xtask/testdata/integration");
+        let file = PathBuf::from("xtask/testdata/integration/template.yaml");
 
         // EV_GREETING and EV_SERVICE are set; EV_UNDEFINED_12345 is not
         temp_env::with_vars(
@@ -512,8 +512,8 @@ mod tests {
         let preloaded = parse_env_file(env_file.path()).unwrap();
         let ctx = EnvContext::new(preloaded, false);
 
-        let base = PathBuf::from("testdata/integration");
-        let file = PathBuf::from("testdata/integration/template.yaml");
+        let base = PathBuf::from("xtask/testdata/integration");
+        let file = PathBuf::from("xtask/testdata/integration/template.yaml");
         process_file(&file, &base, Some(out_dir.path()), &ctx, false);
 
         let missing = ctx.missing_vars();
@@ -527,8 +527,8 @@ mod tests {
     #[test]
     fn fail_on_missing_all_vars_resolved_means_empty_missing() {
         let out_dir = tempfile::TempDir::new().unwrap();
-        let base = PathBuf::from("testdata/integration");
-        let file = PathBuf::from("testdata/integration/nested/service.conf");
+        let base = PathBuf::from("xtask/testdata/integration");
+        let file = PathBuf::from("xtask/testdata/integration/nested/service.conf");
 
         // All three vars in service.conf are provided
         temp_env::with_vars(
