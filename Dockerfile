@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
 
-# Global args — declared before any FROM so they can be used in FROM instructions.
 # Override at build time: --build-arg DISTROLESS_VARIANT=static-debian13 --build-arg DISTROLESS_TAG=nonroot
 ARG DISTROLESS_VARIANT=static-debian12
 ARG DISTROLESS_TAG=latest
@@ -21,7 +20,6 @@ COPY --from=verifier /etc/os-release /tmp/distroless-verified
 
 ARG TARGETARCH
 
-# Map Docker architecture → Rust musl target triple
 RUN case "$TARGETARCH" in \
       amd64)  echo x86_64-unknown-linux-musl      ;; \
       arm64)  echo aarch64-unknown-linux-musl      ;; \
@@ -40,7 +38,8 @@ RUN mkdir src && echo 'fn main(){}' > src/main.rs \
  && rm -rf src
 
 COPY src ./src
-RUN cargo zigbuild --release --target "$(cat /rust_target)" \
+RUN touch src/main.rs \
+ && cargo zigbuild --release --target "$(cat /rust_target)" \
  && cp "target/$(cat /rust_target)/release/envsubst" /envsubst
 
 # Final image
