@@ -1,7 +1,7 @@
 mod env_context;
 
 use env_context::EnvContext;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -22,6 +22,12 @@ fn main() {
         "load variables from GLOB (.env syntax); disables real env lookup",
         "GLOB",
     );
+    opts.optmulti(
+        "s",
+        "scope",
+        "substitute only this variable; repeatable",
+        "VAR",
+    );
     opts.optflag(
         "v",
         "verbose",
@@ -30,7 +36,7 @@ fn main() {
     opts.optflag(
         "f",
         "fail-on-missing",
-        "exit 1 if any variables remain unresolved after substitution",
+        "exit 1 if any eligible variables remain unresolved after substitution",
     );
     opts.optflag("h", "help", "show this help");
 
@@ -47,6 +53,20 @@ fn main() {
 
     let output_dir = matches.opt_str("o").map(PathBuf::from);
     let env_file_globs = matches.opt_strs("e");
+    let scope_values = matches.opt_strs("s");
+    let scope = if scope_values.is_empty() {
+        None
+    } else {
+        for name in &scope_values {
+            if !is_valid_scope_name(name) {
+                eprintln!(
+                    "error: invalid scoped variable '{name}'; expected [A-Za-z_][A-Za-z0-9_]*"
+                );
+                process::exit(1);
+            }
+        }
+        Some(scope_values.into_iter().collect::<HashSet<_>>())
+    };
     let verbose = matches.opt_present("v");
     let fail_on_missing = matches.opt_present("f");
     let patterns = &matches.free;
@@ -87,9 +107,10 @@ fn main() {
         (map, false)
     };
 
-    let ctx = EnvContext::new(preloaded, use_real_env);
+    let ctx = EnvContext::new(preloaded, use_real_env, scope);
 
     let mut file_count = 0u32;
+    let mut pending = Vec::new();
     for pattern in patterns {
         let base = glob_base(pattern);
         let entries = glob::glob(pattern).unwrap_or_else(|e| {
@@ -104,7 +125,13 @@ fn main() {
             if path.is_dir() {
                 continue;
             }
-            process_file(&path, &base, output_dir.as_deref(), &ctx, verbose);
+            if fail_on_missing {
+                if let Some(rendered) = render_file(&path, &base, output_dir.as_deref(), &ctx) {
+                    pending.push(rendered);
+                }
+            } else {
+                process_file(&path, &base, output_dir.as_deref(), &ctx, verbose);
+            }
             file_count += 1;
         }
     }
@@ -116,18 +143,65 @@ fn main() {
 
     let missing = ctx.missing_vars();
     if !missing.is_empty() {
-        if verbose {
-            let mut pairs: Vec<_> = missing.iter().collect();
-            pairs.sort_by_key(|(k, _)| k.as_str());
-            eprintln!("\nunresolved variables ({}):", pairs.len());
-            for (key, count) in &pairs {
-                eprintln!("  ${key} (referenced {count}x)");
-            }
-        }
         if fail_on_missing {
+            print_missing(&missing, "error: unresolved variables");
             process::exit(1);
         }
+        if verbose {
+            print_missing(&missing, "unresolved variables");
+        }
     }
+
+    if fail_on_missing {
+        for rendered in &pending {
+            write_rendered_file(rendered, verbose);
+        }
+    }
+}
+
+fn is_valid_scope_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+fn print_missing(missing: &HashMap<String, usize>, heading: &str) {
+    let mut pairs: Vec<_> = missing.iter().collect();
+    pairs.sort_by_key(|(key, _)| key.as_str());
+    eprintln!("\n{heading} ({}):", pairs.len());
+    for (key, count) in pairs {
+        eprintln!("  ${key} (referenced {count}x)");
+    }
+}
+
+struct RenderedFile {
+    source: PathBuf,
+    output_path: Option<PathBuf>,
+    contents: String,
+}
+
+fn render_file(
+    path: &Path,
+    base: &Path,
+    output_dir: Option<&Path>,
+    ctx: &EnvContext,
+) -> Option<RenderedFile> {
+    let contents = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: skipping '{}': {e}", path.display());
+            return None;
+        }
+    };
+
+    let contents = shellexpand::env_with_context(&contents, |key| ctx.lookup(key))
+        .unwrap()
+        .into_owned();
+    Some(RenderedFile {
+        source: path.to_path_buf(),
+        output_path: output_dir.map(|out_dir| output_path(path, base, out_dir)),
+        contents,
+    })
 }
 
 fn process_file(
@@ -144,31 +218,43 @@ fn process_file(
             return;
         }
     };
+    let result = shellexpand::env_with_context(&contents, |key| ctx.lookup(key)).unwrap();
+    let output_path = output_dir.map(|out_dir| output_path(path, base, out_dir));
 
-    let result = shellexpand::env_with_context(&contents, |k| ctx.lookup(k)).unwrap();
+    write_output(path, output_path.as_deref(), result.as_ref(), verbose);
+}
 
-    match output_dir {
-        Some(out_dir) => {
-            let out_path = output_path(path, base, out_dir);
+fn write_rendered_file(rendered: &RenderedFile, verbose: bool) {
+    write_output(
+        &rendered.source,
+        rendered.output_path.as_deref(),
+        &rendered.contents,
+        verbose,
+    );
+}
+
+fn write_output(source: &Path, output_path: Option<&Path>, contents: &str, verbose: bool) {
+    match output_path {
+        Some(out_path) => {
             if let Some(parent) = out_path.parent()
                 && let Err(e) = fs::create_dir_all(parent)
             {
                 eprintln!("error: cannot create directory '{}': {e}", parent.display());
                 process::exit(1);
             }
-            if let Err(e) = fs::write(&out_path, result.as_bytes()) {
+            if let Err(e) = fs::write(out_path, contents.as_bytes()) {
                 eprintln!("error: cannot write '{}': {e}", out_path.display());
                 process::exit(1);
             }
             if verbose {
-                eprintln!("{} -> {}", path.display(), out_path.display());
+                eprintln!("{} -> {}", source.display(), out_path.display());
             }
         }
         None => {
             if verbose {
-                eprintln!("# {}", path.display());
+                eprintln!("# {}", source.display());
             }
-            print!("{result}");
+            print!("{contents}");
         }
     }
 }
@@ -347,7 +433,7 @@ mod tests {
                 ("EV_SERVICE", Some("my-svc")),
             ],
             || {
-                let ctx = EnvContext::new(HashMap::new(), true);
+                let ctx = EnvContext::new(HashMap::new(), true, None);
                 process_file(&file, &base, Some(out_dir.path()), &ctx, false);
                 let out = fs::read_to_string(out_dir.path().join("template.yaml")).unwrap();
                 assert!(out.contains("greeting: hello"));
@@ -373,7 +459,7 @@ mod tests {
                 ("EV_DEBUG", Some("true")),
             ],
             || {
-                let ctx = EnvContext::new(HashMap::new(), true);
+                let ctx = EnvContext::new(HashMap::new(), true, None);
                 process_file(&file, &base, Some(out_dir.path()), &ctx, false);
                 let out = fs::read_to_string(out_dir.path().join("nested/service.conf")).unwrap();
                 assert!(out.contains("host = localhost"));
@@ -400,7 +486,7 @@ mod tests {
             ],
             || {
                 let preloaded = parse_env_file(env_file.path()).unwrap();
-                let ctx = EnvContext::new(preloaded, false);
+                let ctx = EnvContext::new(preloaded, false, None);
                 let base = PathBuf::from("xtask/testdata/integration");
                 let file = PathBuf::from("xtask/testdata/integration/nested/service.conf");
                 process_file(&file, &base, Some(out_dir.path()), &ctx, false);
@@ -431,7 +517,7 @@ mod tests {
                     ("EV_PORT".to_string(), "1111".to_string()),
                     ("EV_DEBUG".to_string(), "file-debug".to_string()),
                 ]);
-                let ctx = EnvContext::new(preloaded, false);
+                let ctx = EnvContext::new(preloaded, false, None);
                 process_file(&file, &base, Some(out_dir.path()), &ctx, false);
                 let out = fs::read_to_string(out_dir.path().join("nested/service.conf")).unwrap();
                 assert!(out.contains("host = file-host"), "real env must be ignored");
@@ -449,7 +535,7 @@ mod tests {
         temp_env::with_vars(
             [("EV_GREETING", Some("hey")), ("EV_SERVICE", Some("svc"))],
             || {
-                let ctx = EnvContext::new(HashMap::new(), true);
+                let ctx = EnvContext::new(HashMap::new(), true, None);
                 process_file(&file, &base, Some(out_dir.path()), &ctx, false);
                 assert!(ctx.missing_vars().contains_key("EV_UNDEFINED_12345"));
             },
@@ -465,7 +551,7 @@ mod tests {
         temp_env::with_vars(
             [("EV_GREETING", Some("hi")), ("EV_SERVICE", Some("s"))],
             || {
-                let ctx = EnvContext::new(HashMap::new(), true);
+                let ctx = EnvContext::new(HashMap::new(), true, None);
                 // Just verify it doesn't panic; output goes to stdout
                 process_file(&file, &base, None, &ctx, false);
             },
@@ -484,7 +570,7 @@ mod tests {
         temp_env::with_vars(
             [("EV_GREETING", Some("hi")), ("EV_SERVICE", Some("svc"))],
             || {
-                let ctx = EnvContext::new(HashMap::new(), true);
+                let ctx = EnvContext::new(HashMap::new(), true, None);
                 process_file(&file, &base, Some(out_dir.path()), &ctx, false);
                 let missing = ctx.missing_vars();
                 assert!(
@@ -510,7 +596,7 @@ mod tests {
         writeln!(env_file, "EV_SERVICE=svc").unwrap();
 
         let preloaded = parse_env_file(env_file.path()).unwrap();
-        let ctx = EnvContext::new(preloaded, false);
+        let ctx = EnvContext::new(preloaded, false, None);
 
         let base = PathBuf::from("xtask/testdata/integration");
         let file = PathBuf::from("xtask/testdata/integration/template.yaml");
@@ -538,7 +624,7 @@ mod tests {
                 ("EV_DEBUG", Some("false")),
             ],
             || {
-                let ctx = EnvContext::new(HashMap::new(), true);
+                let ctx = EnvContext::new(HashMap::new(), true, None);
                 process_file(&file, &base, Some(out_dir.path()), &ctx, false);
                 assert!(
                     ctx.missing_vars().is_empty(),

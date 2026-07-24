@@ -33,7 +33,8 @@ envsubst [options] PATTERN [PATTERN...]
 | `PATTERN...` | One or more glob patterns matching input files |
 | `-o, --output DIR` | Write substituted files to `DIR`, mirroring the input directory structure. Omit to write to stdout. |
 | `-e, --env-file GLOB` | Load variables from files matching `GLOB` (`.env` syntax). Repeatable. **Mutually exclusive with the real environment** — when any `-e` flag is given, only the loaded files are consulted; system env vars are ignored. |
-| `-f, --fail-on-missing` | Exit with code `1` if any variables remain unresolved after substitution. **This includes variables that have no substitution and are using the default syntax.** |
+| `-s, --scope VAR` | Substitute only `VAR`. Repeatable. Variables outside the scope remain literal, even if they are available in the configured source. |
+| `-f, --fail-on-missing` | Exit with code `1` if an in-scope referenced variable is unset. In this mode, no stdout or output files are written until every input has rendered successfully. |
 | `-v, --verbose` | Print processed file paths and a summary of unresolved variables to stderr. |
 
 ### Variable lookup
@@ -45,14 +46,20 @@ envsubst [options] PATTERN [PATTERN...]
 
 The two modes are mutually exclusive by design. The recommended usage mode is to use `-e` where possible as it is more declarative of intent. If you need both `.env` support and real environment variables you can source the `.env` first or simply run the tool twice.
 
+### Scoped substitution
+
+Without `--scope`, every `${VAR}` / `$VAR` reference is eligible for substitution. Each `--scope VAR` flag adds one variable to a whitelist; unlisted references are retained literally and do not count as unresolved. A scoped variable must be a shell-style identifier: `[A-Za-z_][A-Za-z0-9_]*`.
+
+`--scope` selects variables to substitute; it does not declare them required. `--fail-on-missing` only fails when a scoped variable is referenced and unset. An explicitly empty value is substituted as empty, not considered missing.
+
 ## Examples
 
 ```sh
 # Substitute from the real environment, write to /out
 envsubst "templates/**/*.yaml" --output /out
 
-# Load vars from a .env file; fail if any are unresolved
-envsubst "config/*.conf" --env-file .env --fail-on-missing --output /out
+# Substitute only deployment settings; leave placeholders for later tools intact
+envsubst "config/*.conf" --scope DB_HOST --scope DB_PORT --fail-on-missing --output /out
 
 # Multiple .env files (later files win on conflict)
 envsubst "k8s/**/*.yaml" --env-file base.env --env-file override.env --output /out

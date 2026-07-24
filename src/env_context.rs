@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::env;
 
@@ -8,31 +8,45 @@ use std::env;
 ///
 /// When `use_real_env` is true (no --env-file given), variables are looked
 /// up from the system and cached.
-/// 
+///
 /// When `use_real_env` is false (--env-file provided), variables are looked
 /// up in the provided file(s).
 ///
-/// Missing variables are tracked with access counts.
+/// Missing eligible variables are tracked with access counts. When a scope is
+/// provided, variables outside it are left untouched and are not tracked.
 pub struct EnvContext {
     found: RefCell<HashMap<String, String>>,
     missing: RefCell<HashMap<String, usize>>,
     preloaded: HashMap<String, String>,
     use_real_env: bool,
+    scope: Option<HashSet<String>>,
 }
 
 impl EnvContext {
-    pub fn new(preloaded: HashMap<String, String>, use_real_env: bool) -> Self {
+    pub fn new(
+        preloaded: HashMap<String, String>,
+        use_real_env: bool,
+        scope: Option<HashSet<String>>,
+    ) -> Self {
         Self {
             found: RefCell::new(HashMap::new()),
             missing: RefCell::new(HashMap::new()),
             preloaded,
             use_real_env,
+            scope,
         }
     }
 
     /// Look up a variable. Returns `Ok(Some(...))` if found, `Ok(None)` if missing.
     /// Never returns `Err` — `Infallible` reflects this.
     pub fn lookup(&self, key: &str) -> Result<Option<Cow<'static, str>>, Infallible> {
+        if self
+            .scope
+            .as_ref()
+            .is_some_and(|scope| !scope.contains(key))
+        {
+            return Ok(None);
+        }
         // Cache hit: found
         if let Some(val) = self.found.borrow().get(key) {
             return Ok(Some(Cow::Owned(val.clone())));
@@ -73,7 +87,7 @@ mod tests {
     use super::*;
 
     fn ctx_real() -> EnvContext {
-        EnvContext::new(HashMap::new(), true)
+        EnvContext::new(HashMap::new(), true, None)
     }
 
     fn ctx_file(pairs: &[(&str, &str)]) -> EnvContext {
@@ -81,7 +95,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        EnvContext::new(map, false)
+        EnvContext::new(map, false, None)
     }
 
     // Real env mode
@@ -181,6 +195,36 @@ mod tests {
             assert_eq!(ctx.lookup("EV_REAL_ONLY").unwrap(), None);
             assert_eq!(ctx.missing_vars()["EV_REAL_ONLY"], 1);
         });
+    }
+
+    // Scoped lookup
+
+    #[test]
+    fn scope_leaves_unselected_variables_literal_and_untracked() {
+        let scope = HashSet::from([String::from("EV_SELECTED")]);
+        let ctx = EnvContext::new(
+            HashMap::from([
+                (String::from("EV_SELECTED"), String::from("selected")),
+                (String::from("EV_UNSELECTED"), String::from("unselected")),
+            ]),
+            false,
+            Some(scope),
+        );
+        let out =
+            shellexpand::env_with_context("${EV_SELECTED}/${EV_UNSELECTED}", |key| ctx.lookup(key))
+                .unwrap();
+
+        assert_eq!(out, "selected/${EV_UNSELECTED}");
+        assert!(ctx.missing_vars().is_empty());
+    }
+
+    #[test]
+    fn scope_tracks_missing_selected_variables() {
+        let scope = HashSet::from([String::from("EV_REQUIRED")]);
+        let ctx = EnvContext::new(HashMap::new(), false, Some(scope));
+
+        assert_eq!(ctx.lookup("EV_REQUIRED").unwrap(), None);
+        assert_eq!(ctx.missing_vars()["EV_REQUIRED"], 1);
     }
 
     // Template integration
